@@ -11,10 +11,6 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# ─────────────────────────────────────────────
-# STATE
-# ─────────────────────────────────────────────
-
 SIGNAL_FILE = "/tmp/mt5_signal.json"
 LOG_FILE = "/tmp/mt5_log.json"
 
@@ -43,13 +39,10 @@ def log_event(event):
     except Exception as e:
         logger.error(f"Log error: {e}")
 
-# ─────────────────────────────────────────────
-# HELPERS
-# ─────────────────────────────────────────────
-
 def parse_signal(text):
     text = text.strip()
 
+    # ── Direction ──────────────────────────────
     direction = None
     if re.search(r'\bsell\b', text, re.IGNORECASE):
         direction = "SELL"
@@ -58,8 +51,12 @@ def parse_signal(text):
     if not direction:
         return None
 
+    # ── Entry ──────────────────────────────────
+    # Look for entry range on the FIRST line only (avoids TP4 Open confusion)
+    first_lines = "\n".join(text.splitlines()[:3])
     range_match = re.search(
-        r'(4[0-9]{2,3}(?:\.[0-9]+)?)\s*[-–]\s*(4[0-9]{2,3}(?:\.[0-9]+)?)', text
+        r'(4[0-9]{2,3}(?:\.[0-9]+)?)\s*[-–]\s*(4[0-9]{2,3}(?:\.[0-9]+)?)',
+        first_lines
     )
     if range_match:
         p1 = float(range_match.group(1))
@@ -68,26 +65,34 @@ def parse_signal(text):
     else:
         entry_match = re.search(
             r'(?:buy|sell|now|@|entry|limit)\s*[:\s]?\s*(4[0-9]{2,3}(?:\.[0-9]+)?)',
-            text, re.IGNORECASE
+            first_lines, re.IGNORECASE
         )
         if entry_match:
             entry = float(entry_match.group(1))
         else:
-            prices = re.findall(r'\b4[0-9]{2,3}(?:\.[0-9]+)?\b', text)
+            prices = re.findall(r'\b4[0-9]{2,3}(?:\.[0-9]+)?\b', first_lines)
             entry = float(prices[0]) if prices else None
 
     if not entry:
         return None
 
+    # ── TPs — skip TP4+ and "Open" lines ──────
     tps = []
     for m in re.finditer(
-        r'(?:tp|target)\s*\d*\s*[:\s]?\s*(4[0-9]{2,3}(?:\.[0-9]+)?)',
+        r'\btp\s*([1-3])\s*[:\s]?\s*(4[0-9]{2,3}(?:\.[0-9]+)?)',
         text, re.IGNORECASE
     ):
-        val = m.group(1)
-        if val.lower() != 'open':
-            tps.append(float(val))
+        tps.append(float(m.group(2)))
 
+    # If no numbered TPs found, grab any TP values
+    if not tps:
+        for m in re.finditer(
+            r'\btp\s*[:\s]?\s*(4[0-9]{2,3}(?:\.[0-9]+)?)',
+            text, re.IGNORECASE
+        ):
+            tps.append(float(m.group(1)))
+
+    # ── SL ─────────────────────────────────────
     sl_match = re.search(
         r'(?:sl|stop\s*loss|stoploss)[:\s🚫☹️]*\s*(4[0-9]{2,3}(?:\.[0-9]+)?)',
         text, re.IGNORECASE
@@ -97,6 +102,17 @@ def parse_signal(text):
     if not sl or not tps:
         return None
 
+    # Validate direction makes sense with prices
+    # For BUY: TPs should be above entry, SL below
+    # For SELL: TPs should be below entry, SL above
+    if direction == "BUY" and sl > entry:
+        logger.warning(f"BUY signal but SL {sl} > entry {entry} — skipping")
+        return None
+    if direction == "SELL" and sl < entry:
+        logger.warning(f"SELL signal but SL {sl} < entry {entry} — skipping")
+        return None
+
+    # Pad TPs to 3
     while len(tps) < 3:
         tps.append(tps[-1])
 
@@ -119,7 +135,6 @@ def parse_signal(text):
 def get_signal():
     signal = load_signal()
     logger.info(f"MT5 polled: {signal.get('id')} {signal.get('direction')}")
-    # Auto-clear after serving so EA doesn't execute same signal twice
     if signal.get("direction") not in (None, "none"):
         save_signal({"id": "none", "pair": "XAUUSD", "direction": "none"})
         logger.info("Signal cleared after serving to MT5")
@@ -140,6 +155,7 @@ def new_signal():
         return jsonify({"error": "no text"}), 400
     signal = parse_signal(text)
     if not signal:
+        logger.warning(f"Could not parse signal: {text[:80]}")
         return jsonify({"error": "could not parse"}), 422
     save_signal(signal)
     log_event({"type": "NEW_SIGNAL", **signal})
