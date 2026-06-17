@@ -119,6 +119,10 @@ def parse_signal(text):
 def get_signal():
     signal = load_signal()
     logger.info(f"MT5 polled: {signal.get('id')} {signal.get('direction')}")
+    # Auto-clear after serving so EA doesn't execute same signal twice
+    if signal.get("direction") not in (None, "none"):
+        save_signal({"id": "none", "pair": "XAUUSD", "direction": "none"})
+        logger.info("Signal cleared after serving to MT5")
     return jsonify(signal)
 
 @app.route("/mt5_close", methods=["POST"])
