@@ -443,10 +443,28 @@ def test_sell():
 @app.route("/test-tp1")
 def test_tp1():
     """Test endpoint to simulate MT5 TP1 hit"""
-    import requests as req
-    r = req.post("http://localhost:" + str(int(os.environ.get("PORT", 5000))) + "/mt5_close",
-                 json={"close_type": "TP1", "pair": "XAUUSD", "profit": 150.0})
-    return jsonify({"status": "test TP1 triggered", "result": r.json()})
+    import time
+    dedup_key = "XAUUSD_TP1_test"
+    now = time.time()
+    with tp_close_lock:
+        tp_close_recent[dedup_key] = 0  # reset so test always fires
+    
+    lo, hi = TP_PROFIT_RANGES.get("TP1", (110, 165))
+    profit_gbp = round(random.uniform(lo, hi), 2)
+    text = TP_TEXT.get("TP1", "✅ TP1 HIT!")
+
+    chart_bytes = get_chart_image()
+    card_bytes = generate_profit_card("TP1", profit_gbp, chart_bytes)
+
+    if card_bytes:
+        send_photo_telegram(VIP_CHANNEL, card_bytes, text)
+    else:
+        send_text_telegram(VIP_CHANNEL, text)
+
+    plain_text = text.replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", "")
+    send_to_whatsapp_group(plain_text, "Dummy group testing")
+
+    return jsonify({"status": "test TP1 triggered", "profit_gbp": profit_gbp})
 
 @app.route("/")
 def home():
