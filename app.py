@@ -103,10 +103,10 @@ def parse_signal(text):
     if not entry:
         return None
 
-    # Extract TP1-3 only for MT5
+    # Extract TP1-3 only for MT5 — handle both plain and emoji formats
     tps = []
     for m in re.finditer(
-        r'\btp\s*(\d+)\s*[:\s]?\s*([3-9][0-9]{2,3}(?:\.[0-9]+)?)',
+        r'(?:✅\s*)?\btp\s*(\d+)\s*([3-9][0-9]{2,3}(?:\.[0-9]+)?)',
         text, re.IGNORECASE
     ):
         tp_num = int(m.group(1))
@@ -115,13 +115,13 @@ def parse_signal(text):
 
     if not tps:
         for m in re.finditer(
-            r'\btp\s*[:\s]?\s*([3-9][0-9]{2,3}(?:\.[0-9]+)?)',
+            r'(?:✅\s*)?\btp\s*[:\s]?\s*([3-9][0-9]{2,3}(?:\.[0-9]+)?)',
             text, re.IGNORECASE
         ):
             tps.append(float(m.group(1)))
 
     sl_match = re.search(
-        r'(?:sl|stop\s*loss|stoploss)[:\s🚫☹️🛑]*\s*([3-9][0-9]{2,3}(?:\.[0-9]+)?)',
+        r'(?:🛑|sl|stop\s*loss|stoploss)[:\s🚫☹️]*\s*([3-9][0-9]{2,3}(?:\.[0-9]+)?)',
         text, re.IGNORECASE
     )
     sl = float(sl_match.group(1)) if sl_match else None
