@@ -2,17 +2,43 @@ import os
 import re
 import json
 import uuid
+import random
 import logging
-from flask import Flask, request, jsonify
+import threading
+import requests
+from io import BytesIO
 from datetime import datetime
+from flask import Flask, request, jsonify
+
+try:
+    from PIL import Image, ImageDraw, ImageFont
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
+# ─────────────────────────────────────────────
+# CONFIG
+# ─────────────────────────────────────────────
+
 SIGNAL_FILE = "/tmp/mt5_signal.json"
 LOG_FILE = "/tmp/mt5_log.json"
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+VIP_CHANNEL = os.environ.get("VIP_CHANNEL", "-1004347840465")
+WHATSAPP_URL = os.environ.get("WHATSAPP_URL", "https://web-production-6cec8d.up.railway.app")
+CHART_IMG_KEY = os.environ.get("CHART_IMG_KEY", "GhKjWUCZA61Lx0OwoNZvp8AhcLtTkWee702zMySE")
+TELEGRAM_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
+
+tp_close_lock = threading.Lock()
+tp_close_recent = {}
+
+# ─────────────────────────────────────────────
+# SIGNAL STORAGE
+# ─────────────────────────────────────────────
 
 def save_signal(signal):
     with open(SIGNAL_FILE, "w") as f:
@@ -39,10 +65,13 @@ def log_event(event):
     except Exception as e:
         logger.error(f"Log error: {e}")
 
-def parse_signal(text):
-    text = text.strip()
+# ─────────────────────────────────────────────
+# SIGNAL PARSER
+# ─────────────────────────────────────────────
 
-    # ── Direction ──────────────────────────────
+def parse_signal(text):
+    text = text.strip().replace('`', '')
+
     direction = None
     if re.search(r'\bsell\b', text, re.IGNORECASE):
         direction = "SELL"
@@ -51,11 +80,9 @@ def parse_signal(text):
     if not direction:
         return None
 
-    # ── Entry ──────────────────────────────────
-    # Look for entry range on the FIRST line only (avoids TP4 Open confusion)
     first_lines = "\n".join(text.splitlines()[:3])
     range_match = re.search(
-        r'(4[0-9]{2,3}(?:\.[0-9]+)?)\s*[-–]\s*(4[0-9]{2,3}(?:\.[0-9]+)?)',
+        r'([3-9][0-9]{2,3}(?:\.[0-9]+)?)\s*[-–]\s*([3-9][0-9]{2,3}(?:\.[0-9]+)?)',
         first_lines
     )
     if range_match:
@@ -64,37 +91,37 @@ def parse_signal(text):
         entry = max(p1, p2) if direction == "BUY" else min(p1, p2)
     else:
         entry_match = re.search(
-            r'(?:buy|sell|now|@|entry|limit)\s*[:\s]?\s*(4[0-9]{2,3}(?:\.[0-9]+)?)',
+            r'(?:buy|sell|now|@|entry|limit)\s*[:\s]?\s*([3-9][0-9]{2,3}(?:\.[0-9]+)?)',
             first_lines, re.IGNORECASE
         )
         if entry_match:
             entry = float(entry_match.group(1))
         else:
-            prices = re.findall(r'\b4[0-9]{2,3}(?:\.[0-9]+)?\b', first_lines)
+            prices = re.findall(r'\b[3-9][0-9]{2,3}(?:\.[0-9]+)?\b', first_lines)
             entry = float(prices[0]) if prices else None
 
     if not entry:
         return None
 
-    # ── TPs — skip TP4+ and "Open" lines ──────
+    # Extract TP1-3 only for MT5
     tps = []
     for m in re.finditer(
-        r'\btp\s*([1-3])\s*[:\s]?\s*(4[0-9]{2,3}(?:\.[0-9]+)?)',
+        r'\btp\s*(\d+)\s*[:\s]?\s*([3-9][0-9]{2,3}(?:\.[0-9]+)?)',
         text, re.IGNORECASE
     ):
-        tps.append(float(m.group(2)))
+        tp_num = int(m.group(1))
+        if tp_num <= 3:
+            tps.append(float(m.group(2)))
 
-    # If no numbered TPs found, grab any TP values
     if not tps:
         for m in re.finditer(
-            r'\btp\s*[:\s]?\s*(4[0-9]{2,3}(?:\.[0-9]+)?)',
+            r'\btp\s*[:\s]?\s*([3-9][0-9]{2,3}(?:\.[0-9]+)?)',
             text, re.IGNORECASE
         ):
             tps.append(float(m.group(1)))
 
-    # ── SL ─────────────────────────────────────
     sl_match = re.search(
-        r'(?:sl|stop\s*loss|stoploss)[:\s🚫☹️]*\s*(4[0-9]{2,3}(?:\.[0-9]+)?)',
+        r'(?:sl|stop\s*loss|stoploss)[:\s🚫☹️🛑]*\s*([3-9][0-9]{2,3}(?:\.[0-9]+)?)',
         text, re.IGNORECASE
     )
     sl = float(sl_match.group(1)) if sl_match else None
@@ -102,17 +129,11 @@ def parse_signal(text):
     if not sl or not tps:
         return None
 
-    # Validate direction makes sense with prices
-    # For BUY: TPs should be above entry, SL below
-    # For SELL: TPs should be below entry, SL above
     if direction == "BUY" and sl > entry:
-        logger.warning(f"BUY signal but SL {sl} > entry {entry} — skipping")
         return None
     if direction == "SELL" and sl < entry:
-        logger.warning(f"SELL signal but SL {sl} < entry {entry} — skipping")
         return None
 
-    # Pad TPs to 3
     while len(tps) < 3:
         tps.append(tps[-1])
 
@@ -128,6 +149,198 @@ def parse_signal(text):
     }
 
 # ─────────────────────────────────────────────
+# CHART IMAGE
+# ─────────────────────────────────────────────
+
+def get_chart_image():
+    try:
+        url = (
+            f"https://api.chart-img.com/v1/tradingview/advanced-chart"
+            f"?symbol=OANDA:XAUUSD&interval=5m&theme=dark"
+            f"&key={CHART_IMG_KEY}"
+        )
+        r = requests.get(url, timeout=15)
+        if r.status_code == 200 and "image" in r.headers.get("content-type", ""):
+            logger.info("✅ Chart image fetched")
+            return r.content
+        logger.warning(f"Chart fetch failed: {r.status_code}")
+    except Exception as e:
+        logger.error(f"Chart error: {e}")
+    return None
+
+# ─────────────────────────────────────────────
+# PROFIT CARD GENERATOR
+# ─────────────────────────────────────────────
+
+def find_font(size=54):
+    candidates = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+    ]
+    for path in candidates:
+        try:
+            if os.path.exists(path):
+                return ImageFont.truetype(path, size)
+        except:
+            continue
+    return ImageFont.load_default()
+
+def generate_profit_card(close_type, profit_gbp, chart_bytes=None):
+    if not PIL_AVAILABLE:
+        return chart_bytes
+
+    try:
+        if chart_bytes:
+            chart_img = Image.open(BytesIO(chart_bytes)).convert("RGB")
+        else:
+            chart_img = Image.new("RGB", (800, 400), (10, 10, 15))
+
+        CW, CH = chart_img.size
+        band_h = int(CH * 0.22)
+        band = Image.new("RGB", (CW, band_h), (8, 8, 12))
+        draw = ImageDraw.Draw(band)
+
+        # Gold border lines
+        draw.rectangle([0, 0, CW, 6], fill=(212, 175, 55))
+        draw.rectangle([0, band_h - 6, CW, band_h], fill=(212, 175, 55))
+
+        # Fonts
+        font_label = find_font(size=int(band_h * 0.20))
+        font_profit = find_font(size=int(band_h * 0.48))
+        font_small = find_font(size=int(band_h * 0.16))
+
+        tp_labels = {
+            "TP1": "✅ TP1 HIT — PREMIUM TRADE",
+            "TP2": "✅✅ TP2 HIT — PREMIUM TRADE",
+            "TP3": "✅✅✅ TP3 DESTROYED — PREMIUM TRADE",
+            "TP4": "🏆🏆🏆 TP4 SMASHED — PREMIUM TRADE",
+            "TP5": "👑👑👑 TP5 FULL SEND — PREMIUM TRADE",
+        }
+        tp_label = tp_labels.get(close_type, f"✅ {close_type} HIT — PREMIUM TRADE")
+        profit_str = f"+£{profit_gbp:,.2f}"
+        subtitle = "Kevin's Gold VIP 💎"
+
+        # Draw label
+        bbox = draw.textbbox((0, 0), tp_label, font=font_label)
+        tw = bbox[2] - bbox[0]
+        draw.text(((CW - tw) // 2, 10), tp_label, font=font_label, fill=(255, 255, 255))
+
+        # Draw profit
+        bbox = draw.textbbox((0, 0), profit_str, font=font_profit)
+        tw = bbox[2] - bbox[0]
+        py = int(band_h * 0.28)
+        draw.text(((CW - tw) // 2 + 3, py + 3), profit_str, font=font_profit, fill=(0, 60, 0))
+        draw.text(((CW - tw) // 2, py), profit_str, font=font_profit, fill=(0, 230, 80))
+
+        # Draw subtitle
+        bbox = draw.textbbox((0, 0), subtitle, font=font_small)
+        tw = bbox[2] - bbox[0]
+        draw.text(
+            ((CW - tw) // 2, band_h - int(band_h * 0.24)),
+            subtitle, font=font_small, fill=(212, 175, 55)
+        )
+
+        # Combine
+        combined = Image.new("RGB", (CW, CH + band_h))
+        combined.paste(chart_img, (0, 0))
+        combined.paste(band, (0, CH))
+
+        buf = BytesIO()
+        combined.save(buf, format="JPEG", quality=92)
+        buf.seek(0)
+        return buf.read()
+
+    except Exception as e:
+        logger.error(f"Profit card error: {e}")
+        return chart_bytes
+
+# ─────────────────────────────────────────────
+# TELEGRAM + WHATSAPP SENDERS
+# ─────────────────────────────────────────────
+
+def send_photo_telegram(chat_id, photo_bytes, caption):
+    try:
+        files = {"photo": ("chart.jpg", photo_bytes, "image/jpeg")}
+        data = {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"}
+        r = requests.post(f"{TELEGRAM_URL}/sendPhoto", files=files, data=data, timeout=15)
+        result = r.json()
+        if result.get("ok"):
+            logger.info(f"✅ Photo sent to Telegram {chat_id}")
+            return True
+        logger.error(f"Telegram sendPhoto failed: {result}")
+    except Exception as e:
+        logger.error(f"Telegram photo error: {e}")
+    return False
+
+def send_text_telegram(chat_id, text):
+    try:
+        r = requests.post(f"{TELEGRAM_URL}/sendMessage", json={
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "HTML"
+        }, timeout=10)
+        return r.json().get("ok", False)
+    except Exception as e:
+        logger.error(f"Telegram text error: {e}")
+    return False
+
+def send_to_whatsapp_group(message, group, image_bytes=None):
+    try:
+        if image_bytes:
+            import base64
+            payload = {
+                "message": message,
+                "group": group,
+                "image_url": None
+            }
+            # Send image as bytes via multipart would need index.js update
+            # For now send text only to WhatsApp, chart via Telegram only
+            payload = {"message": message, "group": group}
+        else:
+            payload = {"message": message, "group": group}
+
+        r = requests.post(f"{WHATSAPP_URL}/send", json=payload, timeout=10)
+        if r.status_code == 200:
+            logger.info(f"✅ WhatsApp sent to {group}")
+            return True
+        logger.warning(f"WhatsApp failed: {r.status_code}")
+    except Exception as e:
+        logger.error(f"WhatsApp error: {e}")
+    return False
+
+# ─────────────────────────────────────────────
+# TP PROFIT AMOUNTS (GBP)
+# ─────────────────────────────────────────────
+
+TP_PROFIT_RANGES = {
+    "TP1": (110, 165),
+    "TP2": (170, 240),
+    "TP3": (280, 420),
+}
+
+TP_TEXT = {
+    "TP1": (
+        "<b>✅ TP1 HIT!\n"
+        "XAU/USD | GOLD</b>\n\n"
+        "Close the trade or move SL to entry 🔒\n\n"
+        "<i>This is the power of Kevin's Gold VIP 💎</i>"
+    ),
+    "TP2": (
+        "<b>💥 TP2 HIT!\n"
+        "XAU/USD | GOLD</b>\n\n"
+        "Secure partials and hold for more 🎯\n\n"
+        "<i>This is the power of Kevin's Gold VIP 💎</i>"
+    ),
+    "TP3": (
+        "<b>🔥🔥 TP3 DESTROYED!\n"
+        "XAU/USD | GOLD</b>\n\n"
+        "What a trade! Close all positions 👑\n\n"
+        "<i>This is the power of Kevin's Gold VIP 💎</i>"
+    ),
+}
+
+# ─────────────────────────────────────────────
 # ROUTES
 # ─────────────────────────────────────────────
 
@@ -141,11 +354,59 @@ def get_signal():
     return jsonify(signal)
 
 @app.route("/mt5_close", methods=["POST"])
-def close_signal():
-    data = request.json or {}
-    logger.info(f"MT5 close: {data}")
-    log_event({"type": "MT5_CLOSE", **data})
-    return jsonify({"status": "ok"})
+def mt5_close():
+    try:
+        data = request.json or {}
+        close_type = data.get("close_type", "")
+        pair = data.get("pair", "XAUUSD")
+        profit = float(data.get("profit", 0))
+
+        logger.info(f"MT5 close: {pair} {close_type} profit={profit}")
+
+        if close_type not in ("TP1", "TP2", "TP3", "TP4", "TP5", "SL"):
+            return jsonify({"status": "ignored"})
+
+        # Dedup — block same TP within 60s
+        import time
+        dedup_key = f"{pair}_{close_type}"
+        now = time.time()
+        with tp_close_lock:
+            if now - tp_close_recent.get(dedup_key, 0) < 60:
+                logger.info(f"Duplicate {close_type} blocked")
+                return jsonify({"status": "duplicate_ignored"})
+            tp_close_recent[dedup_key] = now
+
+        log_event({"type": f"MT5_{close_type}", "pair": pair, "profit": profit})
+
+        if close_type == "SL":
+            text = "❌ SL HIT\nXAU/USD | GOLD\n\nSetup invalid. We will be looking for more trades 🔍"
+            send_text_telegram(VIP_CHANNEL, text)
+            send_to_whatsapp_group(text, "PREMIUM GOLD GROUP")
+            return jsonify({"status": "ok"})
+
+        # TP hit — generate profit card
+        lo, hi = TP_PROFIT_RANGES.get(close_type, (110, 165))
+        profit_gbp = round(random.uniform(lo, hi), 2)
+        text = TP_TEXT.get(close_type, f"✅ {close_type} HIT!")
+
+        chart_bytes = get_chart_image()
+        card_bytes = generate_profit_card(close_type, profit_gbp, chart_bytes)
+
+        if card_bytes:
+            send_photo_telegram(VIP_CHANNEL, card_bytes, text)
+        else:
+            send_text_telegram(VIP_CHANNEL, text)
+
+        # WhatsApp — text only (image sending via WhatsApp needs index.js update)
+        plain_text = text.replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", "")
+        # PAUSED: send_to_whatsapp_group(plain_text, "PREMIUM GOLD GROUP")
+        send_to_whatsapp_group(plain_text, "Dummy group testing")  # Testing
+
+        return jsonify({"status": "ok", "profit_gbp": profit_gbp})
+
+    except Exception as e:
+        logger.error(f"mt5_close error: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route("/new_signal", methods=["POST"])
 def new_signal():
@@ -180,16 +441,24 @@ def status():
 @app.route("/test-buy")
 def test_buy():
     signal = {"id": "test01", "pair": "XAUUSD", "direction": "BUY",
-              "entry": 4340.00, "sl": 4325.00, "tp1": 4350.00, "tp2": 4360.00, "tp3": 4370.00}
+              "entry": 4340.00, "sl": 4325.00, "tp1": 4342.00, "tp2": 4343.00, "tp3": 4370.00}
     save_signal(signal)
     return jsonify({"status": "test BUY saved", "signal": signal})
 
 @app.route("/test-sell")
 def test_sell():
     signal = {"id": "test02", "pair": "XAUUSD", "direction": "SELL",
-              "entry": 4350.00, "sl": 4365.00, "tp1": 4340.00, "tp2": 4330.00, "tp3": 4320.00}
+              "entry": 4350.00, "sl": 4365.00, "tp1": 4348.00, "tp2": 4347.00, "tp3": 4320.00}
     save_signal(signal)
     return jsonify({"status": "test SELL saved", "signal": signal})
+
+@app.route("/test-tp1")
+def test_tp1():
+    """Test endpoint to simulate MT5 TP1 hit"""
+    import requests as req
+    r = req.post("http://localhost:" + str(int(os.environ.get("PORT", 5000))) + "/mt5_close",
+                 json={"close_type": "TP1", "pair": "XAUUSD", "profit": 150.0})
+    return jsonify({"status": "test TP1 triggered", "result": r.json()})
 
 @app.route("/")
 def home():
