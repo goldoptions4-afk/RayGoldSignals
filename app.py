@@ -72,6 +72,7 @@ def log_event(event):
 def parse_signal(text):
     text = text.strip().replace('`', '')
 
+    # Direction
     direction = None
     if re.search(r'\bsell\b', text, re.IGNORECASE):
         direction = "SELL"
@@ -80,7 +81,8 @@ def parse_signal(text):
     if not direction:
         return None
 
-    first_lines = "\n".join(text.splitlines()[:3])
+    # Entry — look in first 5 lines
+    first_lines = "\n".join(text.splitlines()[:5])
     range_match = re.search(
         r'([3-9][0-9]{2,3}(?:\.[0-9]+)?)\s*[-–]\s*([3-9][0-9]{2,3}(?:\.[0-9]+)?)',
         first_lines
@@ -90,43 +92,29 @@ def parse_signal(text):
         p2 = float(range_match.group(2))
         entry = max(p1, p2) if direction == "BUY" else min(p1, p2)
     else:
-        entry_match = re.search(
-            r'(?:buy|sell|now|@|entry|limit)\s*[:\s]?\s*([3-9][0-9]{2,3}(?:\.[0-9]+)?)',
-            first_lines, re.IGNORECASE
-        )
-        if entry_match:
-            entry = float(entry_match.group(1))
-        else:
-            prices = re.findall(r'\b[3-9][0-9]{2,3}(?:\.[0-9]+)?\b', first_lines)
-            entry = float(prices[0]) if prices else None
+        prices = re.findall(r'\b[3-9][0-9]{2,3}(?:\.[0-9]+)?\b', first_lines)
+        entry = float(prices[0]) if prices else None
 
     if not entry:
         return None
 
-    # Extract TP1-3 only for MT5 — handle both plain and emoji formats
+    # TPs — handle ✅ TP1 4013.00 format
     tps = []
-    for m in re.finditer(
-        r'(?:✅\s*)?\btp\s*(\d+)\s*([3-9][0-9]{2,3}(?:\.[0-9]+)?)',
-        text, re.IGNORECASE
-    ):
+    for m in re.finditer(r'TP\s*(\d+)\s+([3-9][0-9]{2,3}(?:\.[0-9]+)?)', text, re.IGNORECASE):
         tp_num = int(m.group(1))
         if tp_num <= 3:
             tps.append(float(m.group(2)))
 
     if not tps:
-        for m in re.finditer(
-            r'(?:✅\s*)?\btp\s*[:\s]?\s*([3-9][0-9]{2,3}(?:\.[0-9]+)?)',
-            text, re.IGNORECASE
-        ):
+        for m in re.finditer(r'TP\s*[:\s]\s*([3-9][0-9]{2,3}(?:\.[0-9]+)?)', text, re.IGNORECASE):
             tps.append(float(m.group(1)))
 
-    sl_match = re.search(
-        r'(?:🛑|sl|stop\s*loss|stoploss)[:\s🚫☹️]*\s*([3-9][0-9]{2,3}(?:\.[0-9]+)?)',
-        text, re.IGNORECASE
-    )
+    # SL — handle 🛑 SL 4025.00 format
+    sl_match = re.search(r'SL\s+([3-9][0-9]{2,3}(?:\.[0-9]+)?)', text, re.IGNORECASE)
     sl = float(sl_match.group(1)) if sl_match else None
 
     if not sl or not tps:
+        logger.warning(f"Missing SL or TPs — sl={sl} tps={tps}")
         return None
 
     if direction == "BUY" and sl > entry:
