@@ -199,72 +199,61 @@ def find_font(size=54):
 
 def generate_profit_card(close_type, profit_gbp, chart_bytes=None):
     if not PIL_AVAILABLE:
-        return chart_bytes
-
+        return None
     try:
-        if chart_bytes:
-            chart_img = Image.open(BytesIO(chart_bytes)).convert("RGB")
-        else:
-            chart_img = Image.new("RGB", (800, 400), (10, 10, 15))
+        W, H = 800, 600
+        img = Image.new("RGB", (W, H), (5, 5, 10))
+        draw = ImageDraw.Draw(img)
 
-        CW, CH = chart_img.size
-        band_h = int(CH * 0.22)
-        band = Image.new("RGB", (CW, band_h), (8, 8, 12))
-        draw = ImageDraw.Draw(band)
-
-        # Gold border lines
-        draw.rectangle([0, 0, CW, 6], fill=(212, 175, 55))
-        draw.rectangle([0, band_h - 6, CW, band_h], fill=(212, 175, 55))
-
-        # Fonts
-        font_label = find_font(size=int(band_h * 0.20))
-        font_profit = find_font(size=int(band_h * 0.48))
-        font_small = find_font(size=int(band_h * 0.16))
+        bw = 18
+        draw.rectangle([0, 0, W, bw], fill=(212, 175, 55))
+        draw.rectangle([0, H-bw, W, H], fill=(212, 175, 55))
+        draw.rectangle([0, 0, bw, H], fill=(212, 175, 55))
+        draw.rectangle([W-bw, 0, W, H], fill=(212, 175, 55))
 
         tp_labels = {
-            "TP1": "✅ TP1 HIT — PREMIUM TRADE",
-            "TP2": "✅✅ TP2 HIT — PREMIUM TRADE",
-            "TP3": "✅✅✅ TP3 DESTROYED — PREMIUM TRADE",
-            "TP4": "🏆🏆🏆 TP4 SMASHED — PREMIUM TRADE",
-            "TP5": "👑👑👑 TP5 FULL SEND — PREMIUM TRADE",
+            "TP1": "TP1 SMASHED",
+            "TP2": "TP2 SMASHED",
+            "TP3": "ALL TARGETS HIT",
+            "TP4": "TP4 SMASHED",
+            "TP5": "TP5 FULL SEND",
         }
-        tp_label = tp_labels.get(close_type, f"✅ {close_type} HIT — PREMIUM TRADE")
+        tp_label   = tp_labels.get(close_type, f"{close_type} HIT")
         profit_str = f"+£{profit_gbp:,.2f}"
-        subtitle = "Kevin's Gold VIP 💎"
+        tagline    = "PREMIUM TRADE"
 
-        # Draw label
-        bbox = draw.textbbox((0, 0), tp_label, font=font_label)
+        f_label   = find_font(60)
+        f_profit  = find_font(150)
+        f_tagline = find_font(48)
+
+        bbox = draw.textbbox((0, 0), tp_label, font=f_label)
         tw = bbox[2] - bbox[0]
-        draw.text(((CW - tw) // 2, 10), tp_label, font=font_label, fill=(255, 255, 255))
+        draw.text(((W - tw) // 2, 40), tp_label, font=f_label, fill=(255, 255, 255))
 
-        # Draw profit
-        bbox = draw.textbbox((0, 0), profit_str, font=font_profit)
+        draw.rectangle([40, 120, W-40, 124], fill=(212, 175, 55))
+
+        bbox = draw.textbbox((0, 0), profit_str, font=f_profit)
         tw = bbox[2] - bbox[0]
-        py = int(band_h * 0.28)
-        draw.text(((CW - tw) // 2 + 3, py + 3), profit_str, font=font_profit, fill=(0, 60, 0))
-        draw.text(((CW - tw) // 2, py), profit_str, font=font_profit, fill=(0, 230, 80))
+        px = (W - tw) // 2
+        draw.text((px + 4, 184), profit_str, font=f_profit, fill=(0, 60, 0))
+        draw.text((px, 180), profit_str, font=f_profit, fill=(0, 238, 80))
 
-        # Draw subtitle
-        bbox = draw.textbbox((0, 0), subtitle, font=font_small)
+        draw.rectangle([40, 450, W-40, 454], fill=(212, 175, 55))
+
+        bbox = draw.textbbox((0, 0), tagline, font=f_tagline)
         tw = bbox[2] - bbox[0]
-        draw.text(
-            ((CW - tw) // 2, band_h - int(band_h * 0.24)),
-            subtitle, font=font_small, fill=(212, 175, 55)
-        )
-
-        # Combine
-        combined = Image.new("RGB", (CW, CH + band_h))
-        combined.paste(chart_img, (0, 0))
-        combined.paste(band, (0, CH))
+        draw.text(((W - tw) // 2, 480), tagline, font=f_tagline, fill=(212, 175, 55))
 
         buf = BytesIO()
-        combined.save(buf, format="JPEG", quality=92)
+        img.save(buf, format="JPEG", quality=95)
         buf.seek(0)
-        return buf.read()
+        result = buf.read()
+        logger.info(f"Profit card generated: {len(result)} bytes")
+        return result
 
     except Exception as e:
-        logger.error(f"Profit card error: {e}")
-        return chart_bytes
+        logger.error(f"Profit card error: {e}", exc_info=True)
+        return None
 
 # ─────────────────────────────────────────────
 # TELEGRAM + WHATSAPP SENDERS
