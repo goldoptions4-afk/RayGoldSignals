@@ -21,27 +21,27 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-FONTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
-BUNDLED_BOLD_FONT = os.path.join(FONTS_DIR, "DejaVuSans-Bold.ttf")
-
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def find_font(size=54):
+    """Load font with fallbacks. Checks fonts/ folder in repo FIRST."""
     candidates = [
-        os.path.join(APP_DIR, "fonts", "DejaVuSans-Bold.ttf"),
-        os.path.join(APP_DIR, "DejaVuSans-Bold.ttf"),  # root of repo
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        os.path.join(APP_DIR, "fonts", "DejaVuSans-Bold.ttf"),  # ← CHECK REPO FIRST
+        os.path.join(APP_DIR, "DejaVuSans-Bold.ttf"),
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/crosextra/Carlito-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
     ]
     for path in candidates:
         try:
             if os.path.exists(path):
-                logger.info(f"Using font: {path}")
-                return ImageFont.truetype(path, size)
-        except Exception:
+                font = ImageFont.truetype(path, size)
+                logger.info(f"✅ Font loaded: {path} @ {size}pt")
+                return font
+        except Exception as e:
+            logger.debug(f"Font candidate failed ({path}): {e}")
             continue
-    logger.error("NO FONT FOUND")
+    
+    logger.error(f"❌ NO FONT FOUND (checked {len(candidates)} paths) — using default")
     return ImageFont.load_default()
 
 # ─────────────────────────────────────────────
@@ -183,21 +183,8 @@ def get_chart_image():
 # PROFIT CARD GENERATOR
 # ─────────────────────────────────────────────
 
-def find_font(size=54):
-    candidates = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-        "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
-    ]
-    for path in candidates:
-        try:
-            if os.path.exists(path):
-                return ImageFont.truetype(path, size)
-        except:
-            continue
-    return ImageFont.load_default()
-
 def generate_profit_card(close_type, profit_gbp, chart_bytes=None):
+    """Generate standalone profit card — NO chart, HUGE text."""
     if not PIL_AVAILABLE:
         return None
     try:
@@ -205,6 +192,7 @@ def generate_profit_card(close_type, profit_gbp, chart_bytes=None):
         img = Image.new("RGB", (W, H), (5, 5, 10))
         draw = ImageDraw.Draw(img)
 
+        # Gold border
         bw = 18
         draw.rectangle([0, 0, W, bw], fill=(212, 175, 55))
         draw.rectangle([0, H-bw, W, H], fill=(212, 175, 55))
@@ -222,37 +210,47 @@ def generate_profit_card(close_type, profit_gbp, chart_bytes=None):
         profit_str = f"+£{profit_gbp:,.2f}"
         tagline    = "PREMIUM TRADE"
 
+        # FONTS — HUGE sizes
         f_label   = find_font(60)
-        f_profit  = find_font(150)
+        f_profit  = find_font(200)  # ← INCREASED FROM 150 TO 200
         f_tagline = find_font(48)
 
+        # TP LABEL
         bbox = draw.textbbox((0, 0), tp_label, font=f_label)
         tw = bbox[2] - bbox[0]
         draw.text(((W - tw) // 2, 40), tp_label, font=f_label, fill=(255, 255, 255))
 
+        # DIVIDER
         draw.rectangle([40, 120, W-40, 124], fill=(212, 175, 55))
 
+        # PROFIT AMOUNT — DROP SHADOW + GREEN
         bbox = draw.textbbox((0, 0), profit_str, font=f_profit)
         tw = bbox[2] - bbox[0]
         px = (W - tw) // 2
+        
+        # Dark shadow
         draw.text((px + 4, 184), profit_str, font=f_profit, fill=(0, 60, 0))
+        # Bright green on top
         draw.text((px, 180), profit_str, font=f_profit, fill=(0, 238, 80))
 
+        # DIVIDER
         draw.rectangle([40, 450, W-40, 454], fill=(212, 175, 55))
 
+        # TAGLINE
         bbox = draw.textbbox((0, 0), tagline, font=f_tagline)
         tw = bbox[2] - bbox[0]
         draw.text(((W - tw) // 2, 480), tagline, font=f_tagline, fill=(212, 175, 55))
 
+        # SAVE
         buf = BytesIO()
         img.save(buf, format="JPEG", quality=95)
         buf.seek(0)
         result = buf.read()
-        logger.info(f"Profit card generated: {len(result)} bytes")
+        logger.info(f"✅ Profit card generated: {len(result)} bytes")
         return result
 
     except Exception as e:
-        logger.error(f"Profit card error: {e}", exc_info=True)
+        logger.error(f"❌ Profit card error: {e}", exc_info=True)
         return None
 
 # ─────────────────────────────────────────────
@@ -261,7 +259,7 @@ def generate_profit_card(close_type, profit_gbp, chart_bytes=None):
 
 def send_photo_telegram(chat_id, photo_bytes, caption):
     try:
-        files = {"photo": ("chart.jpg", photo_bytes, "image/jpeg")}
+        files = {"photo": ("card.jpg", photo_bytes, "image/jpeg")}
         data = {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"}
         r = requests.post(f"{TELEGRAM_URL}/sendPhoto", files=files, data=data, timeout=15)
         result = r.json()
@@ -287,19 +285,7 @@ def send_text_telegram(chat_id, text):
 
 def send_to_whatsapp_group(message, group, image_bytes=None):
     try:
-        if image_bytes:
-            import base64
-            payload = {
-                "message": message,
-                "group": group,
-                "image_url": None
-            }
-            # Send image as bytes via multipart would need index.js update
-            # For now send text only to WhatsApp, chart via Telegram only
-            payload = {"message": message, "group": group}
-        else:
-            payload = {"message": message, "group": group}
-
+        payload = {"message": message, "group": group}
         r = requests.post(f"{WHATSAPP_URL}/send", json=payload, timeout=10)
         if r.status_code == 200:
             logger.info(f"✅ WhatsApp sent to {group}")
@@ -314,9 +300,9 @@ def send_to_whatsapp_group(message, group, image_bytes=None):
 # ─────────────────────────────────────────────
 
 TP_PROFIT_RANGES = {
-    "TP1": (110, 165),
-    "TP2": (170, 240),
-    "TP3": (280, 420),
+    "TP1": (450, 660),
+    "TP2": (750, 1050),
+    "TP3": (1200, 1650),
 }
 
 TP_TEXT = {
@@ -385,11 +371,11 @@ def mt5_close():
             return jsonify({"status": "ok"})
 
         # TP hit — generate profit card
-        lo, hi = TP_PROFIT_RANGES.get(close_type, (110, 165))
+        lo, hi = TP_PROFIT_RANGES.get(close_type, (450, 660))
         profit_gbp = round(random.uniform(lo, hi), 2)
         text = TP_TEXT.get(close_type, f"✅ {close_type} HIT!")
 
-        # No chart — standalone profit card only
+        # Generate card
         card_bytes = generate_profit_card(close_type, profit_gbp)
 
         if card_bytes:
@@ -397,7 +383,7 @@ def mt5_close():
         else:
             send_text_telegram(VIP_CHANNEL, text)
 
-        # WhatsApp — text only (image sending via WhatsApp needs index.js update)
+        # WhatsApp — text only
         plain_text = text.replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", "")
         # PAUSED: send_to_whatsapp_group(plain_text, "PREMIUM GOLD GROUP")
         send_to_whatsapp_group(plain_text, "Dummy group testing")  # Testing
@@ -461,12 +447,11 @@ def test_tp1():
     with tp_close_lock:
         tp_close_recent[dedup_key] = 0  # reset so test always fires
     
-    lo, hi = TP_PROFIT_RANGES.get("TP1", (110, 165))
+    lo, hi = TP_PROFIT_RANGES.get("TP1", (450, 660))
     profit_gbp = round(random.uniform(lo, hi), 2)
     text = TP_TEXT.get("TP1", "✅ TP1 HIT!")
 
-    chart_bytes = get_chart_image()
-    card_bytes = generate_profit_card("TP1", profit_gbp, chart_bytes)
+    card_bytes = generate_profit_card("TP1", profit_gbp)
 
     if card_bytes:
         send_photo_telegram(VIP_CHANNEL, card_bytes, text)
