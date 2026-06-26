@@ -21,6 +21,24 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
+FONTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
+BUNDLED_BOLD_FONT = os.path.join(FONTS_DIR, "DejaVuSans-Bold.ttf")
+
+def find_font(size=54):
+    candidates = [
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/crosextra/Carlito-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    ]
+    for path in candidates:
+        try:
+            if os.path.exists(path):
+                return ImageFont.truetype(path, size)
+        except Exception:
+            continue
+    logger.error("NO FONT FOUND — using default")
+    return ImageFont.load_default()
+
 # ─────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────
