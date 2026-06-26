@@ -377,8 +377,8 @@ def mt5_close():
         profit_gbp = round(random.uniform(lo, hi), 2)
         text = TP_TEXT.get(close_type, f"✅ {close_type} HIT!")
 
-        chart_bytes = get_chart_image()
-        card_bytes = generate_profit_card(close_type, profit_gbp, chart_bytes)
+        # No chart — standalone profit card only
+        card_bytes = generate_profit_card(close_type, profit_gbp)
 
         if card_bytes:
             send_photo_telegram(VIP_CHANNEL, card_bytes, text)
