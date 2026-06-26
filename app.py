@@ -24,9 +24,9 @@ app = Flask(__name__)
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def find_font(size=54):
-    """Load font with fallbacks. Checks fonts/ folder in repo FIRST."""
+    """Load font — checks repo fonts/ folder first."""
     candidates = [
-        os.path.join(APP_DIR, "fonts", "DejaVuSans-Bold.ttf"),  # ← CHECK REPO FIRST
+        os.path.join(APP_DIR, "fonts", "DejaVuSans-Bold.ttf"),
         os.path.join(APP_DIR, "DejaVuSans-Bold.ttf"),
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
@@ -40,23 +40,31 @@ def find_font(size=54):
         except Exception as e:
             logger.debug(f"Font candidate failed ({path}): {e}")
             continue
-    
-    logger.error(f"❌ NO FONT FOUND (checked {len(candidates)} paths) — using default")
+    logger.error(f"❌ NO FONT FOUND — using tiny default")
     return ImageFont.load_default()
+
+def find_font_fit(draw, text, max_width, start_size=220, min_size=60):
+    """Auto-shrink font until text fits within max_width."""
+    for size in range(start_size, min_size - 1, -4):
+        font = find_font(size)
+        bbox = draw.textbbox((0, 0), text, font=font)
+        if (bbox[2] - bbox[0]) <= max_width:
+            return font, size
+    return find_font(min_size), min_size
 
 # ─────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────
 
 SIGNAL_FILE = "/tmp/mt5_signal.json"
-LOG_FILE = "/tmp/mt5_log.json"
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+LOG_FILE    = "/tmp/mt5_log.json"
+BOT_TOKEN   = os.environ.get("BOT_TOKEN", "")
 VIP_CHANNEL = os.environ.get("VIP_CHANNEL", "-1004347840465")
 WHATSAPP_URL = os.environ.get("WHATSAPP_URL", "https://web-production-6cec8d.up.railway.app")
 CHART_IMG_KEY = os.environ.get("CHART_IMG_KEY", "GhKjWUCZA61Lx0OwoNZvp8AhcLtTkWee702zMySE")
 TELEGRAM_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-tp_close_lock = threading.Lock()
+tp_close_lock   = threading.Lock()
 tp_close_recent = {}
 
 # ─────────────────────────────────────────────
@@ -95,7 +103,6 @@ def log_event(event):
 def parse_signal(text):
     text = text.strip().replace('`', '')
 
-    # Direction
     direction = None
     if re.search(r'\bsell\b', text, re.IGNORECASE):
         direction = "SELL"
@@ -104,7 +111,6 @@ def parse_signal(text):
     if not direction:
         return None
 
-    # Entry — look in first 5 lines
     first_lines = "\n".join(text.splitlines()[:5])
     range_match = re.search(
         r'([3-9][0-9]{2,3}(?:\.[0-9]+)?)\s*[-–]\s*([3-9][0-9]{2,3}(?:\.[0-9]+)?)',
@@ -121,7 +127,6 @@ def parse_signal(text):
     if not entry:
         return None
 
-    # TPs — handle ✅ TP1 4013.00 format
     tps = []
     for m in re.finditer(r'TP\s*(\d+)\s+([3-9][0-9]{2,3}(?:\.[0-9]+)?)', text, re.IGNORECASE):
         tp_num = int(m.group(1))
@@ -132,7 +137,6 @@ def parse_signal(text):
         for m in re.finditer(r'TP\s*[:\s]\s*([3-9][0-9]{2,3}(?:\.[0-9]+)?)', text, re.IGNORECASE):
             tps.append(float(m.group(1)))
 
-    # SL — handle 🛑 SL 4025.00 format
     sl_match = re.search(r'SL\s+([3-9][0-9]{2,3}(?:\.[0-9]+)?)', text, re.IGNORECASE)
     sl = float(sl_match.group(1)) if sl_match else None
 
@@ -149,14 +153,14 @@ def parse_signal(text):
         tps.append(tps[-1])
 
     return {
-        "id": str(uuid.uuid4())[:8],
-        "pair": "XAUUSD",
+        "id":        str(uuid.uuid4())[:8],
+        "pair":      "XAUUSD",
         "direction": direction,
-        "entry": round(entry, 2),
-        "sl": round(sl, 2),
-        "tp1": round(tps[0], 2),
-        "tp2": round(tps[1], 2),
-        "tp3": round(tps[2], 2),
+        "entry":     round(entry, 2),
+        "sl":        round(sl, 2),
+        "tp1":       round(tps[0], 2),
+        "tp2":       round(tps[1], 2),
+        "tp3":       round(tps[2], 2),
     }
 
 # ─────────────────────────────────────────────
@@ -183,21 +187,24 @@ def get_chart_image():
 # PROFIT CARD GENERATOR
 # ─────────────────────────────────────────────
 
-def generate_profit_card(close_type, profit_gbp, chart_bytes=None):
-    """Generate standalone profit card — NO chart, HUGE text."""
+def generate_profit_card(close_type, profit_gbp):
+    """Generate profit card with auto-fit font so number always fits."""
     if not PIL_AVAILABLE:
         return None
     try:
         W, H = 800, 600
-        img = Image.new("RGB", (W, H), (5, 5, 10))
+        bw   = 18
+        PAD  = 60   # horizontal padding inside border
+        GOLD = (212, 175, 55)
+
+        img  = Image.new("RGB", (W, H), (5, 5, 10))
         draw = ImageDraw.Draw(img)
 
         # Gold border
-        bw = 18
-        draw.rectangle([0, 0, W, bw], fill=(212, 175, 55))
-        draw.rectangle([0, H-bw, W, H], fill=(212, 175, 55))
-        draw.rectangle([0, 0, bw, H], fill=(212, 175, 55))
-        draw.rectangle([W-bw, 0, W, H], fill=(212, 175, 55))
+        draw.rectangle([0,    0,    W,    bw],   fill=GOLD)
+        draw.rectangle([0,    H-bw, W,    H],    fill=GOLD)
+        draw.rectangle([0,    0,    bw,   H],    fill=GOLD)
+        draw.rectangle([W-bw, 0,    W,    H],    fill=GOLD)
 
         tp_labels = {
             "TP1": "TP1 SMASHED",
@@ -207,46 +214,46 @@ def generate_profit_card(close_type, profit_gbp, chart_bytes=None):
             "TP5": "TP5 FULL SEND",
         }
         tp_label   = tp_labels.get(close_type, f"{close_type} HIT")
-        profit_str = f"+£{profit_gbp:,.2f}"
+        profit_str = f"£{profit_gbp:,.2f}"   # no + sign — more space for number
         tagline    = "PREMIUM TRADE"
 
-        # FONTS — HUGE sizes
-        f_label   = find_font(60)
-        f_profit  = find_font(200)  # ← INCREASED FROM 150 TO 200
-        f_tagline = find_font(48)
+        max_w = W - (bw * 2) - (PAD * 2)   # usable width for profit number
 
-        # TP LABEL
+        f_label   = find_font(64)
+        f_tagline = find_font(52)
+        f_profit, profit_size = find_font_fit(draw, profit_str, max_w)
+        logger.info(f"Profit font auto-sized to {profit_size}pt for '{profit_str}'")
+
+        # ── TP LABEL ──────────────────────────────
         bbox = draw.textbbox((0, 0), tp_label, font=f_label)
-        tw = bbox[2] - bbox[0]
-        draw.text(((W - tw) // 2, 40), tp_label, font=f_label, fill=(255, 255, 255))
+        tw   = bbox[2] - bbox[0]
+        draw.text(((W - tw) // 2, 50), tp_label, font=f_label, fill=(255, 255, 255))
 
-        # DIVIDER
-        draw.rectangle([40, 120, W-40, 124], fill=(212, 175, 55))
+        # ── DIVIDER ───────────────────────────────
+        draw.rectangle([40, 130, W-40, 134], fill=GOLD)
 
-        # PROFIT AMOUNT — DROP SHADOW + GREEN
-        bbox = draw.textbbox((0, 0), profit_str, font=f_profit)
-        tw = bbox[2] - bbox[0]
-        px = (W - tw) // 2
-        
-        # Dark shadow
-        draw.text((px + 4, 184), profit_str, font=f_profit, fill=(0, 60, 0))
-        # Bright green on top
-        draw.text((px, 180), profit_str, font=f_profit, fill=(0, 238, 80))
+        # ── PROFIT — centred, auto-sized ──────────
+        bbox     = draw.textbbox((0, 0), profit_str, font=f_profit)
+        tw, th   = bbox[2]-bbox[0], bbox[3]-bbox[1]
+        px       = (W - tw) // 2
+        py       = 150 + ((310 - th) // 2)   # vertically centred in zone 130-460
 
-        # DIVIDER
-        draw.rectangle([40, 450, W-40, 454], fill=(212, 175, 55))
+        draw.text((px+4, py+4), profit_str, font=f_profit, fill=(0, 60, 0))   # shadow
+        draw.text((px,   py),   profit_str, font=f_profit, fill=(0, 238, 80)) # green
 
-        # TAGLINE
+        # ── DIVIDER ───────────────────────────────
+        draw.rectangle([40, 460, W-40, 464], fill=GOLD)
+
+        # ── TAGLINE ───────────────────────────────
         bbox = draw.textbbox((0, 0), tagline, font=f_tagline)
-        tw = bbox[2] - bbox[0]
-        draw.text(((W - tw) // 2, 480), tagline, font=f_tagline, fill=(212, 175, 55))
+        tw   = bbox[2] - bbox[0]
+        draw.text(((W - tw) // 2, 492), tagline, font=f_tagline, fill=GOLD)
 
-        # SAVE
         buf = BytesIO()
         img.save(buf, format="JPEG", quality=95)
         buf.seek(0)
         result = buf.read()
-        logger.info(f"✅ Profit card generated: {len(result)} bytes")
+        logger.info(f"✅ Profit card: {len(result)} bytes")
         return result
 
     except Exception as e:
@@ -259,9 +266,9 @@ def generate_profit_card(close_type, profit_gbp, chart_bytes=None):
 
 def send_photo_telegram(chat_id, photo_bytes, caption):
     try:
-        files = {"photo": ("card.jpg", photo_bytes, "image/jpeg")}
-        data = {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"}
-        r = requests.post(f"{TELEGRAM_URL}/sendPhoto", files=files, data=data, timeout=15)
+        files  = {"photo": ("card.jpg", photo_bytes, "image/jpeg")}
+        data   = {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"}
+        r      = requests.post(f"{TELEGRAM_URL}/sendPhoto", files=files, data=data, timeout=15)
         result = r.json()
         if result.get("ok"):
             logger.info(f"✅ Photo sent to Telegram {chat_id}")
@@ -274,19 +281,17 @@ def send_photo_telegram(chat_id, photo_bytes, caption):
 def send_text_telegram(chat_id, text):
     try:
         r = requests.post(f"{TELEGRAM_URL}/sendMessage", json={
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "HTML"
+            "chat_id": chat_id, "text": text, "parse_mode": "HTML"
         }, timeout=10)
         return r.json().get("ok", False)
     except Exception as e:
         logger.error(f"Telegram text error: {e}")
     return False
 
-def send_to_whatsapp_group(message, group, image_bytes=None):
+def send_to_whatsapp_group(message, group):
     try:
-        payload = {"message": message, "group": group}
-        r = requests.post(f"{WHATSAPP_URL}/send", json=payload, timeout=10)
+        r = requests.post(f"{WHATSAPP_URL}/send",
+                          json={"message": message, "group": group}, timeout=10)
         if r.status_code == 200:
             logger.info(f"✅ WhatsApp sent to {group}")
             return True
@@ -300,8 +305,8 @@ def send_to_whatsapp_group(message, group, image_bytes=None):
 # ─────────────────────────────────────────────
 
 TP_PROFIT_RANGES = {
-    "TP1": (450, 660),
-    "TP2": (750, 1050),
+    "TP1": (450,  660),
+    "TP2": (750,  1050),
     "TP3": (1200, 1650),
 }
 
@@ -342,17 +347,16 @@ def get_signal():
 @app.route("/mt5_close", methods=["POST"])
 def mt5_close():
     try:
-        data = request.json or {}
+        data       = request.json or {}
         close_type = data.get("close_type", "")
-        pair = data.get("pair", "XAUUSD")
-        profit = float(data.get("profit", 0))
+        pair       = data.get("pair", "XAUUSD")
+        profit     = float(data.get("profit", 0))
 
         logger.info(f"MT5 close: {pair} {close_type} profit={profit}")
 
         if close_type not in ("TP1", "TP2", "TP3", "TP4", "TP5", "SL"):
             return jsonify({"status": "ignored"})
 
-        # Dedup — block same TP within 60s
         import time
         dedup_key = f"{pair}_{close_type}"
         now = time.time()
@@ -370,12 +374,9 @@ def mt5_close():
             send_to_whatsapp_group(text, "PREMIUM GOLD GROUP")
             return jsonify({"status": "ok"})
 
-        # TP hit — generate profit card
-        lo, hi = TP_PROFIT_RANGES.get(close_type, (450, 660))
+        lo, hi     = TP_PROFIT_RANGES.get(close_type, (450, 660))
         profit_gbp = round(random.uniform(lo, hi), 2)
-        text = TP_TEXT.get(close_type, f"✅ {close_type} HIT!")
-
-        # Generate card
+        text       = TP_TEXT.get(close_type, f"✅ {close_type} HIT!")
         card_bytes = generate_profit_card(close_type, profit_gbp)
 
         if card_bytes:
@@ -383,10 +384,9 @@ def mt5_close():
         else:
             send_text_telegram(VIP_CHANNEL, text)
 
-        # WhatsApp — text only
-        plain_text = text.replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", "")
+        plain_text = text.replace("<b>","").replace("</b>","").replace("<i>","").replace("</i>","")
         # PAUSED: send_to_whatsapp_group(plain_text, "PREMIUM GOLD GROUP")
-        send_to_whatsapp_group(plain_text, "Dummy group testing")  # Testing
+        send_to_whatsapp_group(plain_text, "Dummy group testing")
 
         return jsonify({"status": "ok", "profit_gbp": profit_gbp})
 
@@ -440,28 +440,54 @@ def test_sell():
 
 @app.route("/test-tp1")
 def test_tp1():
-    """Test endpoint to simulate MT5 TP1 hit"""
     import time
-    dedup_key = "XAUUSD_TP1_test"
-    now = time.time()
     with tp_close_lock:
-        tp_close_recent[dedup_key] = 0  # reset so test always fires
-    
-    lo, hi = TP_PROFIT_RANGES.get("TP1", (450, 660))
+        tp_close_recent["XAUUSD_TP1"] = 0
+    lo, hi     = TP_PROFIT_RANGES["TP1"]
     profit_gbp = round(random.uniform(lo, hi), 2)
-    text = TP_TEXT.get("TP1", "✅ TP1 HIT!")
-
+    text       = TP_TEXT["TP1"]
     card_bytes = generate_profit_card("TP1", profit_gbp)
-
     if card_bytes:
         send_photo_telegram(VIP_CHANNEL, card_bytes, text)
     else:
         send_text_telegram(VIP_CHANNEL, text)
-
-    plain_text = text.replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", "")
+    plain_text = text.replace("<b>","").replace("</b>","").replace("<i>","").replace("</i>","")
     send_to_whatsapp_group(plain_text, "Dummy group testing")
-
     return jsonify({"status": "test TP1 triggered", "profit_gbp": profit_gbp})
+
+@app.route("/test-tp2")
+def test_tp2():
+    import time
+    with tp_close_lock:
+        tp_close_recent["XAUUSD_TP2"] = 0
+    lo, hi     = TP_PROFIT_RANGES["TP2"]
+    profit_gbp = round(random.uniform(lo, hi), 2)
+    text       = TP_TEXT["TP2"]
+    card_bytes = generate_profit_card("TP2", profit_gbp)
+    if card_bytes:
+        send_photo_telegram(VIP_CHANNEL, card_bytes, text)
+    else:
+        send_text_telegram(VIP_CHANNEL, text)
+    plain_text = text.replace("<b>","").replace("</b>","").replace("<i>","").replace("</i>","")
+    send_to_whatsapp_group(plain_text, "Dummy group testing")
+    return jsonify({"status": "test TP2 triggered", "profit_gbp": profit_gbp})
+
+@app.route("/test-tp3")
+def test_tp3():
+    import time
+    with tp_close_lock:
+        tp_close_recent["XAUUSD_TP3"] = 0
+    lo, hi     = TP_PROFIT_RANGES["TP3"]
+    profit_gbp = round(random.uniform(lo, hi), 2)
+    text       = TP_TEXT["TP3"]
+    card_bytes = generate_profit_card("TP3", profit_gbp)
+    if card_bytes:
+        send_photo_telegram(VIP_CHANNEL, card_bytes, text)
+    else:
+        send_text_telegram(VIP_CHANNEL, text)
+    plain_text = text.replace("<b>","").replace("</b>","").replace("<i>","").replace("</i>","")
+    send_to_whatsapp_group(plain_text, "Dummy group testing")
+    return jsonify({"status": "test TP3 triggered", "profit_gbp": profit_gbp})
 
 @app.route("/")
 def home():
