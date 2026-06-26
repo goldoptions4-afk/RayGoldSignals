@@ -24,19 +24,24 @@ app = Flask(__name__)
 FONTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
 BUNDLED_BOLD_FONT = os.path.join(FONTS_DIR, "DejaVuSans-Bold.ttf")
 
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+
 def find_font(size=54):
     candidates = [
+        os.path.join(APP_DIR, "fonts", "DejaVuSans-Bold.ttf"),
+        os.path.join(APP_DIR, "DejaVuSans-Bold.ttf"),  # root of repo
         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-        "/usr/share/fonts/truetype/crosextra/Carlito-Bold.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/crosextra/Carlito-Bold.ttf",
     ]
     for path in candidates:
         try:
             if os.path.exists(path):
+                logger.info(f"Using font: {path}")
                 return ImageFont.truetype(path, size)
         except Exception:
             continue
-    logger.error("NO FONT FOUND — using default")
+    logger.error("NO FONT FOUND")
     return ImageFont.load_default()
 
 # ─────────────────────────────────────────────
