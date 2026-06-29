@@ -307,7 +307,7 @@ def send_to_whatsapp_group(message, group):
 TP_PROFIT_RANGES = {
     "TP1": (450,  660),
     "TP2": (750,  1050),
-    "TP3": (1200, 1650),
+    "TP3": (4000, 5000),
 }
 
 TP_TEXT = {
@@ -385,7 +385,7 @@ def mt5_close():
             send_text_telegram(VIP_CHANNEL, text)
 
         plain_text = text.replace("<b>","").replace("</b>","").replace("<i>","").replace("</i>","")
-        # PAUSED: send_to_whatsapp_group(plain_text, "PREMIUM GOLD GROUP")
+        send_to_whatsapp_group(plain_text, "PREMIUM GOLD GROUP")
         send_to_whatsapp_group(plain_text, "Dummy group testing")
 
         return jsonify({"status": "ok", "profit_gbp": profit_gbp})
