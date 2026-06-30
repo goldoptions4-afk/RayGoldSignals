@@ -67,6 +67,36 @@ TELEGRAM_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 tp_close_lock   = threading.Lock()
 tp_close_recent = {}
 
+# Public base URL of THIS service (RayGoldSignals), used so WhatsApp's
+# bot (index.js) can fetch generated images by URL. Set this in Railway
+# env vars to your RayGoldSignals public domain, e.g.
+# https://web-production-f54d0.up.railway.app
+PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+
+# ─────────────────────────────────────────────
+# IMAGE CACHE — lets WhatsApp's bot fetch generated images by URL
+# ─────────────────────────────────────────────
+
+image_cache_lock = threading.Lock()
+image_cache = {}  # id -> (bytes, content_type, created_at)
+IMAGE_CACHE_MAX_AGE = 600  # seconds — auto-expire old entries
+
+def host_image(image_bytes, content_type="image/jpeg"):
+    """Store image bytes in memory and return a public URL for it."""
+    import time
+    img_id = str(uuid.uuid4())[:12]
+    with image_cache_lock:
+        # purge old entries
+        now = time.time()
+        expired = [k for k, v in image_cache.items() if now - v[2] > IMAGE_CACHE_MAX_AGE]
+        for k in expired:
+            del image_cache[k]
+        image_cache[img_id] = (image_bytes, content_type, now)
+
+    if not PUBLIC_BASE_URL:
+        logger.warning("⚠️ PUBLIC_BASE_URL not set — image URL will be relative and WON'T work for WhatsApp!")
+    return f"{PUBLIC_BASE_URL}/image/{img_id}"
+
 # ─────────────────────────────────────────────
 # SIGNAL STORAGE
 # ─────────────────────────────────────────────
@@ -288,14 +318,16 @@ def send_text_telegram(chat_id, text):
         logger.error(f"Telegram text error: {e}")
     return False
 
-def send_to_whatsapp_group(message, group):
+def send_to_whatsapp_group(message, group, image_url=None):
     try:
-        r = requests.post(f"{WHATSAPP_URL}/send",
-                          json={"message": message, "group": group}, timeout=10)
+        payload = {"message": message, "group": group}
+        if image_url:
+            payload["image_url"] = image_url
+        r = requests.post(f"{WHATSAPP_URL}/send", json=payload, timeout=15)
         if r.status_code == 200:
-            logger.info(f"✅ WhatsApp sent to {group}")
+            logger.info(f"✅ WhatsApp sent to {group}" + (" (with image)" if image_url else ""))
             return True
-        logger.warning(f"WhatsApp failed: {r.status_code}")
+        logger.warning(f"WhatsApp failed: {r.status_code} {r.text[:200]}")
     except Exception as e:
         logger.error(f"WhatsApp error: {e}")
     return False
@@ -385,8 +417,14 @@ def mt5_close():
             send_text_telegram(VIP_CHANNEL, text)
 
         plain_text = text.replace("<b>","").replace("</b>","").replace("<i>","").replace("</i>","")
-        send_to_whatsapp_group(plain_text, "PREMIUM GOLD GROUP")
-        send_to_whatsapp_group(plain_text, "Dummy group testing")
+
+        # Host the profit card so WhatsApp can fetch it by URL
+        card_url = host_image(card_bytes, "image/jpeg") if card_bytes else None
+        if card_bytes and not card_url:
+            logger.warning("⚠️ Profit card generated but hosting failed — sending text only to WhatsApp")
+
+        send_to_whatsapp_group(plain_text, "PREMIUM GOLD GROUP", image_url=card_url)
+        send_to_whatsapp_group(plain_text, "Dummy group testing", image_url=card_url)
 
         return jsonify({"status": "ok", "profit_gbp": profit_gbp})
 
@@ -452,8 +490,9 @@ def test_tp1():
     else:
         send_text_telegram(VIP_CHANNEL, text)
     plain_text = text.replace("<b>","").replace("</b>","").replace("<i>","").replace("</i>","")
-    send_to_whatsapp_group(plain_text, "Dummy group testing")
-    return jsonify({"status": "test TP1 triggered", "profit_gbp": profit_gbp})
+    card_url = host_image(card_bytes, "image/jpeg") if card_bytes else None
+    send_to_whatsapp_group(plain_text, "Dummy group testing", image_url=card_url)
+    return jsonify({"status": "test TP1 triggered", "profit_gbp": profit_gbp, "card_url": card_url})
 
 @app.route("/test-tp2")
 def test_tp2():
@@ -469,8 +508,9 @@ def test_tp2():
     else:
         send_text_telegram(VIP_CHANNEL, text)
     plain_text = text.replace("<b>","").replace("</b>","").replace("<i>","").replace("</i>","")
-    send_to_whatsapp_group(plain_text, "Dummy group testing")
-    return jsonify({"status": "test TP2 triggered", "profit_gbp": profit_gbp})
+    card_url = host_image(card_bytes, "image/jpeg") if card_bytes else None
+    send_to_whatsapp_group(plain_text, "Dummy group testing", image_url=card_url)
+    return jsonify({"status": "test TP2 triggered", "profit_gbp": profit_gbp, "card_url": card_url})
 
 @app.route("/test-tp3")
 def test_tp3():
@@ -486,8 +526,31 @@ def test_tp3():
     else:
         send_text_telegram(VIP_CHANNEL, text)
     plain_text = text.replace("<b>","").replace("</b>","").replace("<i>","").replace("</i>","")
-    send_to_whatsapp_group(plain_text, "Dummy group testing")
-    return jsonify({"status": "test TP3 triggered", "profit_gbp": profit_gbp})
+    card_url = host_image(card_bytes, "image/jpeg") if card_bytes else None
+    send_to_whatsapp_group(plain_text, "Dummy group testing", image_url=card_url)
+    return jsonify({"status": "test TP3 triggered", "profit_gbp": profit_gbp, "card_url": card_url})
+
+@app.route("/image/<img_id>", methods=["GET"])
+def serve_image(img_id):
+    from flask import Response
+    with image_cache_lock:
+        entry = image_cache.get(img_id)
+    if not entry:
+        return jsonify({"error": "not found or expired"}), 404
+    image_bytes, content_type, _ = entry
+    return Response(image_bytes, mimetype=content_type)
+
+@app.route("/host_image", methods=["POST"])
+def upload_image():
+    """Accepts raw image bytes (e.g. from bot.py's chart fetch) and returns
+    a public URL so WhatsApp's bot can fetch it. Send as raw body with
+    Content-Type: image/jpeg or image/png."""
+    image_bytes = request.get_data()
+    if not image_bytes:
+        return jsonify({"error": "no image data"}), 400
+    content_type = request.content_type or "image/jpeg"
+    url = host_image(image_bytes, content_type)
+    return jsonify({"status": "ok", "url": url})
 
 @app.route("/")
 def home():
