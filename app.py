@@ -318,14 +318,18 @@ def send_text_telegram(chat_id, text):
         logger.error(f"Telegram text error: {e}")
     return False
 
-def send_to_whatsapp_group(message, group, image_url=None):
+def send_to_whatsapp_group(message, group, image_bytes=None, image_url=None):
     try:
+        import base64
         payload = {"message": message, "group": group}
-        if image_url:
+        if image_bytes:
+            # Send as base64 directly — no URL hosting needed, no cache expiry risk
+            payload["image_data"] = base64.b64encode(image_bytes).decode("utf-8")
+        elif image_url:
             payload["image_url"] = image_url
-        r = requests.post(f"{WHATSAPP_URL}/send", json=payload, timeout=15)
+        r = requests.post(f"{WHATSAPP_URL}/send", json=payload, timeout=30)
         if r.status_code == 200:
-            logger.info(f"✅ WhatsApp sent to {group}" + (" (with image)" if image_url else ""))
+            logger.info(f"✅ WhatsApp sent to {group}" + (" (with image)" if image_bytes or image_url else ""))
             return True
         logger.warning(f"WhatsApp failed: {r.status_code} {r.text[:200]}")
     except Exception as e:
@@ -344,22 +348,19 @@ TP_PROFIT_RANGES = {
 
 TP_TEXT = {
     "TP1": (
-        "<b>✅ TP1 HIT!\n"
-        "XAU/USD | GOLD</b>\n\n"
-        "Close the trade or move SL to entry 🔒\n\n"
-        "<i>This is the power of Kevin's Gold VIP 💎</i>"
+        "<b>GOLD SMASHED TP1 ✅✅✅</b>\n\n"
+        "Close your positions or move SL to Break Even 🔒\n\n"
+        "<i>Want trades like this in your account automatically? Join our Gold Account Management 💰</i>"
     ),
     "TP2": (
-        "<b>💥 TP2 HIT!\n"
-        "XAU/USD | GOLD</b>\n\n"
-        "Secure partials and hold for more 🎯\n\n"
-        "<i>This is the power of Kevin's Gold VIP 💎</i>"
+        "<b>GOLD SMASHED TP2 ✅✅✅✅</b>\n\n"
+        "Close remaining positions or move SL to Break Even 🔒\n\n"
+        "<i>Stop watching trades — let us execute them for you. Join Gold Account Management 💰</i>"
     ),
     "TP3": (
-        "<b>🔥🔥 TP3 DESTROYED!\n"
-        "XAU/USD | GOLD</b>\n\n"
-        "What a trade! Close all positions 👑\n\n"
-        "<i>This is the power of Kevin's Gold VIP 💎</i>"
+        "<b>GOLD SMASHED TP3 ✅✅✅✅✅</b>\n\n"
+        "Close all positions and lock in your profits 🔒\n\n"
+        "<i>This is what Gold Account Management does for our clients — every single trade, automatically in your account. Join now 💰</i>"
     ),
 }
 
@@ -375,6 +376,41 @@ def get_signal():
         save_signal({"id": "none", "pair": "XAUUSD", "direction": "none"})
         logger.info("Signal cleared after serving to MT5")
     return jsonify(signal)
+
+def _process_tp_close(close_type, pair, profit):
+    """Runs in a background thread so mt5_close can respond to MT5 instantly."""
+    import time
+    t0 = time.time()
+    try:
+        if close_type == "SL":
+            text = "❌ SL HIT\nXAU/USD | GOLD\n\nSetup invalid. We will be looking for more trades 🔍"
+            send_text_telegram(VIP_CHANNEL, text)
+            send_to_whatsapp_group(text, "PREMIUM GOLD GROUP")
+            logger.info(f"SL close processed in {time.time()-t0:.1f}s")
+            return
+
+        lo, hi     = TP_PROFIT_RANGES.get(close_type, (450, 660))
+        profit_gbp = round(random.uniform(lo, hi), 2)
+        text       = TP_TEXT.get(close_type, f"✅ {close_type} HIT!")
+        card_bytes = generate_profit_card(close_type, profit_gbp)
+        logger.info(f"[{close_type}] card generated in {time.time()-t0:.1f}s ({len(card_bytes) if card_bytes else 0} bytes)")
+
+        if card_bytes:
+            send_photo_telegram(VIP_CHANNEL, card_bytes, text)
+        else:
+            send_text_telegram(VIP_CHANNEL, text)
+        logger.info(f"[{close_type}] telegram sent at {time.time()-t0:.1f}s")
+
+        plain_text = text.replace("<b>","").replace("</b>","").replace("<i>","").replace("</i>","")
+
+        # Send card bytes directly as base64 — no URL hosting, no cache expiry
+        send_to_whatsapp_group(plain_text, "PREMIUM GOLD GROUP", image_bytes=card_bytes)
+        logger.info(f"[{close_type}] whatsapp PREMIUM sent at {time.time()-t0:.1f}s")
+        send_to_whatsapp_group(plain_text, "Dummy group testing", image_bytes=card_bytes)
+        logger.info(f"[{close_type}] whatsapp Dummy sent at {time.time()-t0:.1f}s — total {time.time()-t0:.1f}s")
+
+    except Exception as e:
+        logger.error(f"[{close_type}] ❌ background processing error: {e}", exc_info=True)
 
 @app.route("/mt5_close", methods=["POST"])
 def mt5_close():
@@ -400,33 +436,17 @@ def mt5_close():
 
         log_event({"type": f"MT5_{close_type}", "pair": pair, "profit": profit})
 
-        if close_type == "SL":
-            text = "❌ SL HIT\nXAU/USD | GOLD\n\nSetup invalid. We will be looking for more trades 🔍"
-            send_text_telegram(VIP_CHANNEL, text)
-            send_to_whatsapp_group(text, "PREMIUM GOLD GROUP")
-            return jsonify({"status": "ok"})
+        # Respond to MT5 immediately — do the slow Telegram/WhatsApp sends
+        # in the background so the EA never sees a slow/hanging response,
+        # and so a stalled WhatsApp call can't delay the Telegram send (or
+        # vice versa) or risk Railway/proxy cutting the connection mid-send.
+        threading.Thread(
+            target=_process_tp_close,
+            args=(close_type, pair, profit),
+            daemon=True
+        ).start()
 
-        lo, hi     = TP_PROFIT_RANGES.get(close_type, (450, 660))
-        profit_gbp = round(random.uniform(lo, hi), 2)
-        text       = TP_TEXT.get(close_type, f"✅ {close_type} HIT!")
-        card_bytes = generate_profit_card(close_type, profit_gbp)
-
-        if card_bytes:
-            send_photo_telegram(VIP_CHANNEL, card_bytes, text)
-        else:
-            send_text_telegram(VIP_CHANNEL, text)
-
-        plain_text = text.replace("<b>","").replace("</b>","").replace("<i>","").replace("</i>","")
-
-        # Host the profit card so WhatsApp can fetch it by URL
-        card_url = host_image(card_bytes, "image/jpeg") if card_bytes else None
-        if card_bytes and not card_url:
-            logger.warning("⚠️ Profit card generated but hosting failed — sending text only to WhatsApp")
-
-        send_to_whatsapp_group(plain_text, "PREMIUM GOLD GROUP", image_url=card_url)
-        send_to_whatsapp_group(plain_text, "Dummy group testing", image_url=card_url)
-
-        return jsonify({"status": "ok", "profit_gbp": profit_gbp})
+        return jsonify({"status": "ok", "queued": True})
 
     except Exception as e:
         logger.error(f"mt5_close error: {e}")
@@ -490,9 +510,8 @@ def test_tp1():
     else:
         send_text_telegram(VIP_CHANNEL, text)
     plain_text = text.replace("<b>","").replace("</b>","").replace("<i>","").replace("</i>","")
-    card_url = host_image(card_bytes, "image/jpeg") if card_bytes else None
-    send_to_whatsapp_group(plain_text, "Dummy group testing", image_url=card_url)
-    return jsonify({"status": "test TP1 triggered", "profit_gbp": profit_gbp, "card_url": card_url})
+    send_to_whatsapp_group(plain_text, "Dummy group testing", image_bytes=card_bytes)
+    return jsonify({"status": "test TP1 triggered", "profit_gbp": profit_gbp})
 
 @app.route("/test-tp2")
 def test_tp2():
@@ -508,9 +527,8 @@ def test_tp2():
     else:
         send_text_telegram(VIP_CHANNEL, text)
     plain_text = text.replace("<b>","").replace("</b>","").replace("<i>","").replace("</i>","")
-    card_url = host_image(card_bytes, "image/jpeg") if card_bytes else None
-    send_to_whatsapp_group(plain_text, "Dummy group testing", image_url=card_url)
-    return jsonify({"status": "test TP2 triggered", "profit_gbp": profit_gbp, "card_url": card_url})
+    send_to_whatsapp_group(plain_text, "Dummy group testing", image_bytes=card_bytes)
+    return jsonify({"status": "test TP2 triggered", "profit_gbp": profit_gbp})
 
 @app.route("/test-tp3")
 def test_tp3():
@@ -526,9 +544,8 @@ def test_tp3():
     else:
         send_text_telegram(VIP_CHANNEL, text)
     plain_text = text.replace("<b>","").replace("</b>","").replace("<i>","").replace("</i>","")
-    card_url = host_image(card_bytes, "image/jpeg") if card_bytes else None
-    send_to_whatsapp_group(plain_text, "Dummy group testing", image_url=card_url)
-    return jsonify({"status": "test TP3 triggered", "profit_gbp": profit_gbp, "card_url": card_url})
+    send_to_whatsapp_group(plain_text, "Dummy group testing", image_bytes=card_bytes)
+    return jsonify({"status": "test TP3 triggered", "profit_gbp": profit_gbp})
 
 @app.route("/image/<img_id>", methods=["GET"])
 def serve_image(img_id):
