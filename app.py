@@ -383,9 +383,10 @@ def _process_tp_close(close_type, pair, profit):
     t0 = time.time()
     try:
         if close_type == "SL":
-            text = "❌ SL HIT\nXAU/USD | GOLD\n\nSetup invalid. We will be looking for more trades 🔍"
+            text = "❌ Apologies, We Hit SL On This Trade\nXAU/USD | GOLD\n\nWe will be looking for more setups 🔍"
             send_text_telegram(VIP_CHANNEL, text)
             send_to_whatsapp_group(text, "PREMIUM GOLD GROUP")
+            send_to_whatsapp_group(text, "Dummy group testing")
             logger.info(f"SL close processed in {time.time()-t0:.1f}s")
             return
 
